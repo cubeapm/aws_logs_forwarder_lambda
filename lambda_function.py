@@ -89,21 +89,80 @@ class LogTypeDetector:
 
 class WAFLogProcessor:
   @staticmethod
+  def _flatten_dict(obj: Dict[str, Any], parent_key: str = '', sep: str = '.') -> Dict[str, Any]:
+    """
+    Flatten a nested dictionary into dot-notation keys.
+    Special handling for name/value pairs like headers (Go-style approach).
+    
+    Args:
+      obj: Dictionary to flatten
+      parent_key: Current parent key for recursion
+      sep: Separator for nested keys
+    
+    Returns:
+      Flattened dictionary with dot-notation keys
+    """
+    items = []
+    
+    for key, value in obj.items():
+      new_key = f"{parent_key}{sep}{key}" if parent_key else key
+      
+      if isinstance(value, dict):
+        # Recursively flatten nested dictionaries
+        items.extend(WAFLogProcessor._flatten_dict(value, new_key, sep=sep).items())
+      elif isinstance(value, list):
+        if len(value) == 0:
+          # Empty array
+          items.append((new_key, ''))
+        elif (isinstance(value[0], dict) and len(value[0]) == 2 and 
+              'name' in value[0] and 'value' in value[0]):
+          # Special case: array of name/value pairs (like headers)
+          # Convert to direct field access: headers.Host instead of headers.0.name
+          for item in value:
+            if isinstance(item, dict) and 'name' in item and 'value' in item:
+              header_name = item['name']
+              header_value = item['value']
+              items.append((f"{new_key}.{header_name}", header_value))
+        elif isinstance(value[0], dict):
+          # Array of objects - flatten each with index
+          for i, item in enumerate(value):
+            if isinstance(item, dict):
+              items.extend(WAFLogProcessor._flatten_dict(item, f"{new_key}.{i}", sep=sep).items())
+            else:
+              items.append((f"{new_key}.{i}", item))
+        else:
+          # Array of primitives - join as comma-separated string
+          items.append((new_key, ','.join(str(v) for v in value) if value else ''))
+      else:
+        # Primitive value
+        items.append((new_key, value))
+    
+    return dict(items)
+
+  @staticmethod
   def parse_waf_log(line: str) -> Optional[Dict[str, Any]]:
     try:
       waf_log = json.loads(line.strip())
       
-      result = {
-        "timestamp": waf_log.get("timestamp"),
-        "_msg": line.strip(),
+      # Flatten the WAF log into key-value pairs
+      flattened_waf = WAFLogProcessor._flatten_dict(waf_log)
+      
+      # Build the structured WAF log (similar to ELB format)
+      waf_structured = {
+        "_time": waf_log.get("timestamp"),
         "event.domain": "aws.waf"
       }
       
       # Add cube.environment if provided
       if CUBE_ENVIRONMENT:
-        result["cube.environment"] = CUBE_ENVIRONMENT
+        waf_structured["cube.environment"] = CUBE_ENVIRONMENT
       
-      return result
+      # Add all flattened WAF fields (no prefix, matching Go implementation)
+      for key, value in flattened_waf.items():
+        waf_structured[key] = value
+      
+      return waf_structured
+      
     except json.JSONDecodeError as e:
       logger.error(f"Failed to parse WAF log: {e}")
       return None
@@ -162,7 +221,7 @@ class ELBAccessLogProcessor:
       # New format ELB Access Log with all 30 fields
       elb_log = {
         "type": parts[0],
-        "timestamp": parts[1],
+        "_time": parts[1],
         "elb": parts[2],
         "client_ip": client_parts[0],
         "client_port": client_parts[1],
@@ -192,20 +251,17 @@ class ELBAccessLogProcessor:
         "target_status_code_list": parts[26],
         "classification": parts[27],
         "classification_reason": parts[28],
-        "tid": parts[29]  # TID is the 30th field
+        "tid": parts[29],  # TID is the 30th field
+        "event.domain": "aws.elb.access",
+        "cube.environment": CUBE_ENVIRONMENT
       }
       
-      result = {
-        "timestamp": parts[1],
-        "_msg": json.dumps(elb_log),
-        "event.domain": "aws.elb.access"
-      }
+      # result = {
+      #   "timestamp": parts[1],
+      #   "_msg": elb_log,
+      # }
       
-      # Add cube.environment if provided
-      if CUBE_ENVIRONMENT:
-        result["cube.environment"] = CUBE_ENVIRONMENT
-      
-      return result
+      return elb_log
       
     except (IndexError, ValueError) as e:
       logger.error(f"Failed to parse ELB access log: {e}")
@@ -226,7 +282,7 @@ class ELBConnectionLogProcessor:
       
       # ELB Connection Logs (12 fields)
       elb_log = {
-        "timestamp": parts[0],
+        "_time": parts[0],
         "client_ip": parts[1],
         "client_port": parts[2],
         "target_port": parts[3],
@@ -237,24 +293,16 @@ class ELBConnectionLogProcessor:
         "incoming_tls_alert": parts[8],
         "chosen_cipher": parts[9],
         "tls_protocol": parts[10],
-        "trace_id": parts[11]
+        "trace_id": parts[11],
+        "event.domain": "aws.elb.connection",
+        "cube.environment": CUBE_ENVIRONMENT
       }
       
       # Add any additional fields if present
       for i in range(12, len(parts)):
         elb_log[f"field_{i}"] = parts[i]
-      
-      result = {
-        "timestamp": parts[0],
-        "_msg": json.dumps(elb_log),
-        "event.domain": "aws.elb.connection"
-      }
-      
-      # Add cube.environment if provided
-      if CUBE_ENVIRONMENT:
-        result["cube.environment"] = CUBE_ENVIRONMENT
-      
-      return result
+
+      return elb_log
       
     except (IndexError, ValueError) as e:
       logger.error(f"Failed to parse ELB connection log: {e}")
@@ -265,11 +313,8 @@ class ELBConnectionLogProcessor:
 
 class LogShipper:
   def __init__(self, endpoint: str, max_retries: int = MAX_RETRIES, base_delay: float = BASE_DELAY):
-    # Add query parameters to the endpoint
-    if '?' in endpoint:
-      self.endpoint = f"{endpoint}&_stream_fields=event.domain&_time_field=timestamp"
-    else:
-      self.endpoint = f"{endpoint}?_stream_fields=event.domain&_time_field=timestamp"
+    # Use clean endpoint, stream fields will be set via header
+    self.endpoint = endpoint
     self.max_retries = max_retries
     self.base_delay = base_delay
   
@@ -288,7 +333,8 @@ class LogShipper:
       
       headers = {
         'Content-Type': 'application/x-ndjson',
-        'Content-Encoding': 'gzip'
+        'Content-Encoding': 'gzip',
+        'Cube-Stream-Fields': 'event.domain'
       }
       
       logger.info(f"Shipping {len(log_entries)} log entries (compressed size: {len(gzipped_data)} bytes)")

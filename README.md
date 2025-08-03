@@ -5,7 +5,6 @@ AWS Lambda function that processes ALB, ELB, and WAF logs from S3 and forwards t
 ## Features
 
 - **Multi-format support**: ALB access logs, ELB connection logs, and WAF logs
-- **Unified output**: JSON Lines format with `_msg` field containing original log data
 - **Automatic detection**: Log type detection from S3 key patterns
 - **Retry logic**: HTTP requests with exponential backoff
 - **Environment metadata**: Optional `cube.environment` field support
@@ -53,20 +52,3 @@ AWS Lambda function that processes ALB, ELB, and WAF logs from S3 and forwards t
   ]
 }
 ```
-
-## Output Format
-
-All logs are unified to JSON Lines format:
-
-```json
-{
-  "timestamp": "2024-01-01T12:00:00Z",
-  "_msg": "original log data",
-  "event.domain": "aws.elb.access",
-  "cube.environment": "production"
-}
-```
-
-- `event.domain`: `aws.waf`, `aws.elb.access`, or `aws.elb.connection`
-- `_msg`: Original log data (stringified JSON for WAF, raw text for ELB/ALB)
-- `cube.environment`: Added when `CUBE_ENVIRONMENT` is set
