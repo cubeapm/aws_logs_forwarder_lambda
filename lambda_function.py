@@ -1,36 +1,7 @@
 """
 AWS Lambda Log Forwarder for ALB and WAF Logs
 
-Processes AWS S3 log files and forwards them to a log ingestion endpoint.
-Supports both Application Load Balancer (ALB) and Web Application Firewall (WAF) logs.
-
-INPUT LOG FORMATS:
-
-1. ELB Access Logs (space-separated format, exactly 30 fields):
-   http 2025-07-18T12:25:31.520793Z app/lb-01/e3610968cb568663 152.32.168.24:30040 172.31.38.249:3000 0.008 0.001 0.000 404 404 62 395 "GET http://13.42.111.243:80/version HTTP/1.1" "-" - - arn:aws:elasticloadbalancing:eu-west-2:971937583728:targetgroup/tg-01/f7453679acf18aae "Root=1-687a3d3b-0e279def7df7c8f739199dd3" "-" "-" 0 2025-07-18T12:25:31.511000Z "waf,forward" "-" "-" "172.31.38.249:3000" "404" "-" "-" TID_2e8432b67236ef4597489a4947734c97
-
-2. ELB Connection Logs (space-separated format, 12 fields):
-   2025-07-18T12:51:25.299253Z 52.34.228.235 38910 80 - - - "-" - - - TID_3f9ddfa803beb546812b02872b46c30b
-
-3. WAF Logs (JSON format):
-   {"timestamp":1752758462381,"formatVersion":1,"webaclId":"arn:aws:wafv2:eu-west-2:971937583728:regional/webacl/CreatedByALB-lb-01/102e3f7b-6149-4113-ae99-72f52dfb4fd8","terminatingRuleId":"Default_Action","terminatingRuleType":"REGULAR","action":"ALLOW","httpRequest":{"clientIp":"103.100.219.14","country":"IN","uri":"/","httpMethod":"GET"}}
-
-OUTPUT FORMAT (all log types unified):
-{
-  "timestamp": 1752758462381,
-  "_msg": "ORIGINAL_LOG_DATA_AS_JSON_STRING",
-  "event.domain": "aws.waf" | "aws.elb.access" | "aws.elb.connection",
-  "cube.environment": "production" (optional, if CUBE_ENVIRONMENT is set)
-}
-
-S3 KEY DETECTION PATTERNS:
-- WAF: Contains 'waf' or 'webacllog' in path
-- ELB Connection: Contains 'connectionlogs' in path OR 'conn_log' in filename
-- ELB Access: Contains 'alb', 'elb', or 'elasticloadbalancing' in path (but not connection indicators)
-
-CONTENT-BASED DETECTION (fallback):
-- ELB Access: 15+ fields (HTTP request logs)
-- ELB Connection: 12 fields (connection logs)
+Processes AWS S3 log files and forwards them to CubeAPM.
 """
 
 import boto3
@@ -57,6 +28,7 @@ LOG_ENDPOINT = os.environ.get("LOG_ENDPOINT")
 if not LOG_ENDPOINT:
   raise ValueError("LOG_ENDPOINT environment variable is required")
 
+CUBE_ENVIRONMENT_KEY = os.environ.get("CUBE_ENVIRONMENT_KEY", "cube.environment")
 CUBE_ENVIRONMENT = os.environ.get("CUBE_ENVIRONMENT")
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "3"))
 BASE_DELAY = float(os.environ.get("RETRY_BASE_DELAY", "1.0"))
@@ -139,33 +111,19 @@ class WAFLogProcessor:
     
     return dict(items)
 
+  # WAF Logs (JSON format):
+  # {"timestamp":1752758462381,"formatVersion":1,"webaclId":"arn:aws:wafv2:eu-west-2:971937583728:regional/webacl/CreatedByALB-lb-01/102e3f7b-6149-4113-ae99-72f52dfb4fd8","terminatingRuleId":"Default_Action","terminatingRuleType":"REGULAR","action":"ALLOW","httpRequest":{"clientIp":"103.100.219.14","country":"IN","uri":"/","httpMethod":"GET"}}
   @staticmethod
   def parse_waf_log(line: str) -> Optional[Dict[str, Any]]:
     try:
-      waf_log = json.loads(line.strip())
-      
-      # Flatten the WAF log into key-value pairs
+      waf_log = json.loads(line.strip())      
       flattened_waf = WAFLogProcessor._flatten_dict(waf_log)
-      
-      # Build the structured WAF log (similar to ELB format)
-      waf_structured = {
-        "_time": waf_log.get("timestamp"),
-        "event.domain": "aws.waf"
-      }
-      
-      # Add cube.environment if provided
+      flattened_waf["event.domain"] = "aws.waf"
       if CUBE_ENVIRONMENT:
-        waf_structured["cube.environment"] = CUBE_ENVIRONMENT
+        flattened_waf[CUBE_ENVIRONMENT_KEY] = CUBE_ENVIRONMENT
       
-      # Add all flattened WAF fields (no prefix, matching Go implementation)
-      for key, value in flattened_waf.items():
-        waf_structured[key] = value
+      return flattened_waf
       
-      return waf_structured
-      
-    except json.JSONDecodeError as e:
-      logger.error(f"Failed to parse WAF log: {e}")
-      return None
     except Exception as e:
       logger.error(f"Unexpected error parsing WAF log: {e}")
       return None
@@ -187,7 +145,6 @@ class ELBAccessLogProcessor:
       
       if char == '"':
         in_quotes = not in_quotes
-        current_part += char
       elif char == ' ' and not in_quotes:
         if current_part:
           parts.append(current_part)
@@ -203,6 +160,8 @@ class ELBAccessLogProcessor:
     
     return parts
 
+  # ELB Access Logs (space-separated format, exactly 30 fields):
+  # http 2025-07-18T12:25:31.520793Z app/lb-01/e3610968cb568663 152.32.168.24:30040 172.31.38.249:3000 0.008 0.001 0.000 404 404 62 395 "GET http://13.42.111.243:80/version HTTP/1.1" "-" - - arn:aws:elasticloadbalancing:eu-west-2:971937583728:targetgroup/tg-01/f7453679acf18aae "Root=1-687a3d3b-0e279def7df7c8f739199dd3" "-" "-" 0 2025-07-18T12:25:31.511000Z "waf,forward" "-" "-" "172.31.38.249:3000" "404" "-" "-" TID_2e8432b67236ef4597489a4947734c97
   @staticmethod
   def parse_elb_access_log(line: str) -> Optional[Dict[str, Any]]:
     try:
@@ -210,7 +169,7 @@ class ELBAccessLogProcessor:
       parts = ELBAccessLogProcessor._parse_alb_line(line.strip())
       
       # Only support the new 30-field format
-      if len(parts) != 30:
+      if len(parts) < 30:
         logger.warning(f"Invalid ELB access log format - expected 30 fields, got {len(parts)}. Line: {line[:200]}...")
         return None
       
@@ -221,7 +180,7 @@ class ELBAccessLogProcessor:
       # New format ELB Access Log with all 30 fields
       elb_log = {
         "type": parts[0],
-        "_time": parts[1],
+        "timestamp": parts[1],
         "elb": parts[2],
         "client_ip": client_parts[0],
         "client_port": client_parts[1],
@@ -251,38 +210,34 @@ class ELBAccessLogProcessor:
         "target_status_code_list": parts[26],
         "classification": parts[27],
         "classification_reason": parts[28],
-        "tid": parts[29],  # TID is the 30th field
+        "tid": parts[29],
         "event.domain": "aws.elb.access",
-        "cube.environment": CUBE_ENVIRONMENT
+        CUBE_ENVIRONMENT_KEY: CUBE_ENVIRONMENT
       }
-      
-      # result = {
-      #   "timestamp": parts[1],
-      #   "_msg": elb_log,
-      # }
+
+      # Add any additional fields if present
+      for i in range(30, len(parts)):
+        elb_log[f"field_{i}"] = parts[i]
       
       return elb_log
-      
-    except (IndexError, ValueError) as e:
-      logger.error(f"Failed to parse ELB access log: {e}")
-      return None
     except Exception as e:
       logger.error(f"Unexpected error parsing ELB access log: {e}")
       return None
 
 class ELBConnectionLogProcessor:
+  # ELB Connection Logs (space-separated format, 12 fields):
+  # 2025-07-18T12:51:25.299253Z 52.34.228.235 38910 80 - - - "-" - - - TID_3f9ddfa803beb546812b02872b46c30b
   @staticmethod
   def parse_elb_connection_log(line: str) -> Optional[Dict[str, Any]]:
     try:
-      parts = line.strip().split(' ')
+      parts = ELBAccessLogProcessor._parse_alb_line(line.strip())
       
       if len(parts) < 12:
         logger.warning(f"Malformed ELB connection log line - insufficient fields: {len(parts)}")
         return None
       
-      # ELB Connection Logs (12 fields)
       elb_log = {
-        "_time": parts[0],
+        "timestamp": parts[0],
         "client_ip": parts[1],
         "client_port": parts[2],
         "target_port": parts[3],
@@ -295,7 +250,7 @@ class ELBConnectionLogProcessor:
         "tls_protocol": parts[10],
         "trace_id": parts[11],
         "event.domain": "aws.elb.connection",
-        "cube.environment": CUBE_ENVIRONMENT
+        CUBE_ENVIRONMENT_KEY: CUBE_ENVIRONMENT
       }
       
       # Add any additional fields if present
@@ -304,9 +259,6 @@ class ELBConnectionLogProcessor:
 
       return elb_log
       
-    except (IndexError, ValueError) as e:
-      logger.error(f"Failed to parse ELB connection log: {e}")
-      return None
     except Exception as e:
       logger.error(f"Unexpected error parsing ELB connection log: {e}")
       return None
@@ -334,7 +286,8 @@ class LogShipper:
       headers = {
         'Content-Type': 'application/x-ndjson',
         'Content-Encoding': 'gzip',
-        'Cube-Stream-Fields': 'event.domain'
+        'Cube-Stream-Fields': 'event.domain',
+        'Cube-Time-Field': 'timestamp'
       }
       
       logger.info(f"Shipping {len(log_entries)} log entries (compressed size: {len(gzipped_data)} bytes)")

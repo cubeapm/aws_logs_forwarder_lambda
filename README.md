@@ -12,6 +12,7 @@ AWS Lambda function that processes ALB, ELB, and WAF logs from S3 and forwards t
 ## Environment Variables
 
 - `LOG_ENDPOINT` - **Required** log ingestion endpoint URL
+- `CUBE_ENVIRONMENT_KEY` - Optional environment identifier key(default: cube.environment)
 - `CUBE_ENVIRONMENT` - Optional environment identifier (e.g., "production", "staging")
 - `MAX_RETRIES` - Retry attempts (default: 3)
 - `REQUEST_TIMEOUT` - HTTP timeout in seconds (default: 30)
