@@ -14,12 +14,7 @@ import urllib.error
 import socket
 import time
 import random
-import logging
 from typing import Dict, List, Optional, Any
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # AWS clients
 s3_client = boto3.client('s3')
@@ -58,13 +53,13 @@ def download_and_decompress(bucket: str, key: str) -> Optional[str]:
     response = s3_client.get_object(Bucket=bucket, Key=key)
     return gzip.decompress(response['Body'].read()).decode('utf-8')
   except Exception as e:
-    logger.error(f"Failed to download/decompress s3://{bucket}/{key}: {e}")
+    print(f"Failed to download/decompress s3://{bucket}/{key}: {e}")
     return None
 
 def ship_logs(log_entries: List[str], file_path: str) -> bool:
   """Ship logs to CubeAPM endpoint - expects JSON lines format"""
   if not log_entries:
-    logger.info("No log entries to ship")
+    print("No log entries to ship")
     return True
   
   try:
@@ -81,11 +76,11 @@ def ship_logs(log_entries: List[str], file_path: str) -> bool:
     if extra_fields:
       headers['Cube-Extra-Fields'] = extra_fields  # key1:value1,key2:value2
 
-    logger.info(f"Shipping {len(log_entries)} log entries (compressed size: {len(gzipped_data)} bytes) from {file_path}")
+    print(f"Shipping {len(log_entries)} log entries (compressed size: {len(gzipped_data)} bytes) from {file_path}")
     return post_with_retry(gzipped_data, headers, file_path)
     
   except Exception as e:
-    logger.error(f"Failed to prepare logs for shipping: {e}. File: {file_path}")
+    print(f"Failed to prepare logs for shipping: {e}. File: {file_path}")
     return False
 
 def post_with_retry(payload: bytes, headers: Dict[str, str], file_path: str) -> bool:
@@ -103,18 +98,18 @@ def post_with_retry(payload: bytes, headers: Dict[str, str], file_path: str) -> 
       with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
         status_code = response.status
         if 200 <= status_code < 300:
-          logger.info(f"Successfully shipped logs (status: {status_code}) from {file_path}")
+          print(f"Successfully shipped logs (status: {status_code}) from {file_path}")
           return True
         elif status_code in (429, 500, 502, 503, 504):
           # Retryable errors
           wait_time = BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.5)
-          logger.warning(f"Retryable error {status_code} for {file_path}, retrying in {wait_time:.2f}s (attempt {attempt + 1}/{MAX_RETRIES})")
+          print(f"Retryable error {status_code} for {file_path}, retrying in {wait_time:.2f}s (attempt {attempt + 1}/{MAX_RETRIES})")
           time.sleep(wait_time)
           attempt += 1
         else:
           # Non-retryable errors
           response_text = response.read().decode('utf-8')
-          logger.error(f"Non-retryable error {status_code} for {file_path}: {response_text}")
+          print(f"Non-retryable error {status_code} for {file_path}: {response_text}")
           return False
           
     except urllib.error.HTTPError as e:
@@ -123,23 +118,23 @@ def post_with_retry(payload: bytes, headers: Dict[str, str], file_path: str) -> 
       if status_code in (429, 500, 502, 503, 504):
         # Retryable HTTP errors
         wait_time = BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.5)
-        logger.warning(f"Retryable HTTP error {status_code} for {file_path}, retrying in {wait_time:.2f}s (attempt {attempt + 1}/{MAX_RETRIES})")
+        print(f"Retryable HTTP error {status_code} for {file_path}, retrying in {wait_time:.2f}s (attempt {attempt + 1}/{MAX_RETRIES})")
         time.sleep(wait_time)
         attempt += 1
       else:
         # Non-retryable HTTP errors
         error_text = e.read().decode('utf-8') if hasattr(e, 'read') else str(e)
-        logger.error(f"Non-retryable HTTP error {status_code} for {file_path}: {error_text}")
+        print(f"Non-retryable HTTP error {status_code} for {file_path}: {error_text}")
         return False
         
     except (urllib.error.URLError, socket.timeout, OSError) as e:
       # Network errors, timeouts, connection issues
       wait_time = BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.5)
-      logger.warning(f"Network error for {file_path}: {e}, retrying in {wait_time:.2f}s (attempt {attempt + 1}/{MAX_RETRIES})")
+      print(f"Network error for {file_path}: {e}, retrying in {wait_time:.2f}s (attempt {attempt + 1}/{MAX_RETRIES})")
       time.sleep(wait_time)
       attempt += 1
   
-  logger.error(f"Failed to ship logs after {MAX_RETRIES} attempts for {file_path}")
+  print(f"Failed to ship logs after {MAX_RETRIES} attempts for {file_path}")
   return False
 
 # WAF Log Processing
@@ -183,7 +178,7 @@ def process_waf_logs(content: str, file_path: str) -> List[str]:
   log_entries = []
   lines = content.strip().split('\n')
   
-  logger.info(f"Processing {len(lines)} lines from WAF file: {file_path}")
+  print(f"Processing {len(lines)} lines from WAF file: {file_path}")
   
   for line_num, line in enumerate(lines, 1):
     try:
@@ -195,7 +190,7 @@ def process_waf_logs(content: str, file_path: str) -> List[str]:
       
       log_entries.append(json.dumps(flattened_waf))
     except Exception as e:
-      logger.warning(f"Failed to parse WAF log line {line_num}: {e}. File: {file_path}. Line: {line[:200]}...")
+      print(f"Failed to parse WAF log line {line_num}: {e}. File: {file_path}. Line: {line[:200]}...")
       continue
   
   return log_entries
@@ -232,14 +227,14 @@ def process_elb_access_logs(content: str, file_path: str) -> List[str]:
   log_entries = []
   lines = content.strip().split('\n')
   
-  logger.info(f"Processing {len(lines)} lines from ELB access file: {file_path}")
+  print(f"Processing {len(lines)} lines from ELB access file: {file_path}")
   
   for line_num, line in enumerate(lines, 1):
     try:
       parts = parse_log_line(line.strip())
       
       if len(parts) < 30:
-        logger.warning(f"Invalid ELB access log format - expected 30 fields, got {len(parts)} at line {line_num}. File: {file_path}")
+        print(f"Invalid ELB access log format - expected 30 fields, got {len(parts)} at line {line_num}. File: {file_path}")
         continue
       
       # Parse client and target endpoints
@@ -250,10 +245,10 @@ def process_elb_access_logs(content: str, file_path: str) -> List[str]:
         "type": parts[0],
         "timestamp": parts[1],
         "elb": parts[2],
-        "client_ip": client_parts[0],
-        "client_port": client_parts[1],
-        "target_ip": target_parts[0],
-        "target_port": target_parts[1],
+        "client_ip": client_parts[0] if client_parts else "-",
+        "client_port": client_parts[1] if len(client_parts) > 1 else "-",
+        "target_ip": target_parts[0] if target_parts else "-",
+        "target_port": target_parts[1] if len(target_parts) > 1 else "-",
         "request_processing_time": parts[5],
         "target_processing_time": parts[6],
         "response_processing_time": parts[7],
@@ -290,7 +285,7 @@ def process_elb_access_logs(content: str, file_path: str) -> List[str]:
       # Convert to JSON string immediately
       log_entries.append(json.dumps(elb_log))
     except Exception as e:
-      logger.warning(f"Failed to parse ELB access log line {line_num}: {e}. File: {file_path}. Line: {line[:200]}...")
+      print(f"Failed to parse ELB access log line {line_num}: {e}. File: {file_path}. Line: {line[:200]}...")
       continue
   
   return log_entries
@@ -300,14 +295,14 @@ def process_elb_connection_logs(content: str, file_path: str) -> List[str]:
   log_entries = []
   lines = content.strip().split('\n')
   
-  logger.info(f"Processing {len(lines)} lines from ELB connection file: {file_path}")
+  print(f"Processing {len(lines)} lines from ELB connection file: {file_path}")
   
   for line_num, line in enumerate(lines, 1):
     try:
       parts = parse_log_line(line)
       
       if len(parts) < 12:
-        logger.warning(f"Malformed ELB connection log line - insufficient fields: {len(parts)} at line {line_num}. File: {file_path}")
+        print(f"Malformed ELB connection log line - insufficient fields: {len(parts)} at line {line_num}. File: {file_path}")
         continue
       
       elb_log = {
@@ -334,7 +329,7 @@ def process_elb_connection_logs(content: str, file_path: str) -> List[str]:
       # Convert to JSON string immediately
       log_entries.append(json.dumps(elb_log))
     except Exception as e:
-      logger.warning(f"Failed to parse ELB connection log line {line_num}: {e}. File: {file_path}. Line: {line[:200]}...")
+      print(f"Failed to parse ELB connection log line {line_num}: {e}. File: {file_path}. Line: {line[:200]}...")
       continue
   
   return log_entries
@@ -344,14 +339,14 @@ def process_nlb_logs(content: str, file_path: str) -> List[str]:
   log_entries = []
   lines = content.strip().split('\n')
   
-  logger.info(f"Processing {len(lines)} lines from NLB file: {file_path}")
+  print(f"Processing {len(lines)} lines from NLB file: {file_path}")
   
   for line_num, line in enumerate(lines, 1):
     try:
       parts = parse_log_line(line)
       
       if len(parts) < 21:
-        logger.warning(f"Invalid NLB log format - expected 21 fields, got {len(parts)} at line {line_num}. File: {file_path}")
+        print(f"Invalid NLB log format - expected 21 fields, got {len(parts)} at line {line_num}. File: {file_path}")
         continue
       
       # Parse client and destination endpoints
@@ -394,7 +389,7 @@ def process_nlb_logs(content: str, file_path: str) -> List[str]:
       # Convert to JSON string immediately
       log_entries.append(json.dumps(nlb_log))
     except Exception as e:
-      logger.warning(f"Failed to parse NLB log line {line_num}: {e}. File: {file_path}. Line: {line[:200]}...")
+      print(f"Failed to parse NLB log line {line_num}: {e}. File: {file_path}. Line: {line[:200]}...")
       continue
   
   return log_entries
@@ -411,14 +406,14 @@ def lambda_handler(event, context):
       file_path = f"s3://{bucket}/{key}"
       current_file_path = file_path
       
-      logger.info(f"Processing log file: {file_path}")
+      print(f"Processing log file: {file_path}")
       
       log_type = detect_log_type(key)
-      logger.info(f"Detected log type: {log_type} for file: {file_path}")
+      print(f"Detected log type: {log_type} for file: {file_path}")
       
       if log_type == "unknown":
         error_msg = f"Unknown log type for file {file_path}"
-        logger.error(error_msg)
+        print(error_msg)
         results.append({
           'bucket': bucket,
           'key': key,
@@ -453,7 +448,7 @@ def lambda_handler(event, context):
           log_entries = process_nlb_logs(content, file_path)
       except Exception as e:
         error_msg = f"Error processing {log_type} logs from {file_path}: {e}"
-        logger.error(error_msg)
+        print(error_msg)
         results.append({
           'bucket': bucket,
           'key': key,
@@ -467,7 +462,7 @@ def lambda_handler(event, context):
       if log_entries:
         success = ship_logs(log_entries, file_path)
         if success:
-          logger.info(f"Successfully processed {len(log_entries)} log entries from {file_path}")
+          print(f"Successfully processed {len(log_entries)} log entries from {file_path}")
           results.append({
             'bucket': bucket,
             'key': key,
@@ -484,7 +479,7 @@ def lambda_handler(event, context):
             'error_message': f"Failed to ship logs from {file_path}"
           })
       else:
-        logger.warning(f"No valid log entries found in {file_path}")
+        print(f"No valid log entries found in {file_path}")
         results.append({
           'bucket': bucket,
           'key': key,
@@ -494,14 +489,14 @@ def lambda_handler(event, context):
         })
   
   except Exception as e:
-    logger.error(f"Critical error in lambda handler while processing {current_file_path}: {e}")
+    print(f"Critical error in lambda handler while processing {current_file_path}: {e}")
     raise
   
   # Log summary
   total_processed = sum(r['processed_count'] for r in results)
   successful_files = sum(1 for r in results if r['success'])
   
-  logger.info(f"Processing complete: {successful_files}/{len(results)} files successful, {total_processed} total log entries processed")
+  print(f"Processing complete: {successful_files}/{len(results)} files successful, {total_processed} total log entries processed")
   
   return {
     'statusCode': 200,
