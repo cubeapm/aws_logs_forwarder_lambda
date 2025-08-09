@@ -28,7 +28,7 @@ CUBE_ENVIRONMENT_KEY = os.environ.get("CUBE_ENVIRONMENT_KEY", "cube.environment"
 CUBE_ENVIRONMENT = os.environ.get("CUBE_ENVIRONMENT")
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "3"))
 BASE_DELAY = float(os.environ.get("RETRY_BASE_DELAY", "1.0"))
-REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "30"))
+REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "60"))
 
 def detect_log_type(s3_key: str) -> str:
   """Detect log type from S3 key"""
@@ -356,7 +356,7 @@ def process_nlb_logs(content: str, file_path: str) -> List[str]:
       nlb_log = {
         "type": parts[0],
         "version": parts[1],
-        "time": parts[2],
+        "_time": parts[2],
         "elb": parts[3],
         "listener": parts[4],
         "client_ip": client_parts[0],
@@ -377,7 +377,7 @@ def process_nlb_logs(content: str, file_path: str) -> List[str]:
         "alpn_fe_protocol": parts[18],
         "alpn_be_protocol": parts[19],
         "alpn_client_preference_list": parts[20],
-        "tls_connection_creation_time": parts[21] if len(parts) > 21 else "-",
+        "_time": parts[21] if len(parts) > 21 else "-",
         "event.domain": "aws.nlb",
         CUBE_ENVIRONMENT_KEY: CUBE_ENVIRONMENT
       }
