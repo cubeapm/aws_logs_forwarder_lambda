@@ -45,6 +45,27 @@ def detect_log_type(s3_key: str) -> str:
   if 'alb' in key_lower or 'elasticloadbalancing' in key_lower or 'elb' in key_lower:
     return "elb_access"
   
+  # CloudFront logs follow pattern: <distribution-id>.<date>.<random-string>
+  # Example: E23UGXVBCLZ154.2025-07-29-11.03cc1165
+  parts = key_lower.split('.')
+  if len(parts) >= 3:
+    # Check distribution ID format
+    if (parts[0].startswith('e') and      # Distribution ID starts with E
+        len(parts[0]) == 14):             # Distribution ID is 14 chars
+      
+      # Check date format (YYYY-MM-DD-HH)
+      date_parts = parts[1].split('-')
+      if (len(date_parts) == 4 and        # Should have 4 parts
+          len(date_parts[0]) == 4 and     # Year should be 4 digits
+          date_parts[0].isdigit() and     # Year should be numeric
+          len(date_parts[1]) == 2 and     # Month should be 2 digits
+          date_parts[1].isdigit() and     # Month should be numeric
+          len(date_parts[2]) == 2 and     # Day should be 2 digits
+          date_parts[2].isdigit() and     # Day should be numeric
+          len(date_parts[3]) == 2 and     # Hour should be 2 digits
+          date_parts[3].isdigit()):       # Hour should be numeric
+        return "cloudfront"
+  
   return "unknown"
 
 def download_and_decompress(bucket: str, key: str) -> Optional[str]:
@@ -377,7 +398,7 @@ def process_nlb_logs(content: str, file_path: str) -> List[str]:
         "alpn_fe_protocol": parts[18],
         "alpn_be_protocol": parts[19],
         "alpn_client_preference_list": parts[20],
-        "_time": parts[21] if len(parts) > 21 else "-",
+        "tls_connection_creation_time": parts[21] if len(parts) > 21 else "-",
         "event.domain": "aws.nlb",
         CUBE_ENVIRONMENT_KEY: CUBE_ENVIRONMENT
       }
@@ -390,6 +411,70 @@ def process_nlb_logs(content: str, file_path: str) -> List[str]:
       log_entries.append(json.dumps(nlb_log))
     except Exception as e:
       print(f"Failed to parse NLB log line {line_num}: {e}. File: {file_path}. Line: {line[:200]}...")
+      continue
+  
+  return log_entries
+
+def process_cloudfront_logs(content: str, file_path: str) -> List[str]:
+  """Process CloudFront logs - returns JSON lines"""
+  log_entries = []
+  lines = content.strip().split('\n')
+  
+  if len(lines) < 2:
+    print(f"CloudFront log file too short (no headers): {file_path}")
+    return log_entries
+    
+  # Skip version line
+  if not lines[0].startswith('#Version:'):
+    print(f"Invalid CloudFront log - missing version header: {file_path}")
+    return log_entries
+  
+  # Parse fields line to get column names
+  if not lines[1].startswith('#Fields:'):
+    print(f"Invalid CloudFront log - missing fields header: {file_path}")
+    return log_entries
+    
+  # Extract field names, removing '#Fields:' prefix and splitting on tabs
+  field_names = lines[1].replace('#Fields:', '').strip().split('\t')
+  
+  print(f"Processing CloudFront file: {file_path}")
+  
+  # Process each log line starting after headers
+  for line_num, line in enumerate(lines[2:], 3):
+    try:
+      if not line.strip():  # Skip empty lines
+        continue
+        
+      # Split line by tabs and create dict from field names and values
+      values = line.strip().split('\t')
+      if len(values) != len(field_names):
+        print(f"Invalid CloudFront log line {line_num} - field count mismatch. Expected {len(field_names)}, got {len(values)}. File: {file_path}")
+        continue
+      
+      # Create log entry combining date and time fields
+      cloudfront_log = {}
+      for field, value in zip(field_names, values):
+        if field == 'date' and 'time' in field_names:
+          # Skip individual date field, we'll combine it with time
+          continue
+        elif field == 'time' and 'date' in field_names:
+          # Combine date and time into timestamp
+          date_idx = field_names.index('date')
+          date = values[date_idx]
+          cloudfront_log['_time'] = f"{date}T{value}Z"
+        else:
+          # Replace hyphens with empty string for empty fields
+          cloudfront_log[field] = value if value != '-' else ''
+      
+      # Add standard fields
+      cloudfront_log['event.domain'] = 'aws.cloudfront'
+      if CUBE_ENVIRONMENT:
+        cloudfront_log[CUBE_ENVIRONMENT_KEY] = CUBE_ENVIRONMENT
+      
+      log_entries.append(json.dumps(cloudfront_log))
+      
+    except Exception as e:
+      print(f"Failed to parse CloudFront log line {line_num}: {e}. File: {file_path}. Line: {line[:200]}...")
       continue
   
   return log_entries
@@ -446,6 +531,8 @@ def lambda_handler(event, context):
           log_entries = process_elb_connection_logs(content, file_path)
         elif log_type == "nlb":
           log_entries = process_nlb_logs(content, file_path)
+        elif log_type == "cloudfront":
+          log_entries = process_cloudfront_logs(content, file_path)
       except Exception as e:
         error_msg = f"Error processing {log_type} logs from {file_path}: {e}"
         print(error_msg)
