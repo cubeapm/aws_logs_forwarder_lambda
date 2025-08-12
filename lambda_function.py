@@ -33,6 +33,7 @@ REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "60"))
 def detect_log_type(s3_key: str) -> str:
   """Detect log type from S3 key"""
   key_lower = s3_key.lower()
+  
   if 'waf' in key_lower or 'webacllog' in key_lower:
     return "waf"
   
@@ -45,26 +46,10 @@ def detect_log_type(s3_key: str) -> str:
   if 'alb' in key_lower or 'elasticloadbalancing' in key_lower or 'elb' in key_lower:
     return "elb_access"
   
-  # CloudFront logs follow pattern: <distribution-id>.<date>.<random-string>
-  # Example: E23UGXVBCLZ154.2025-07-29-11.03cc1165
-  parts = key_lower.split('.')
-  if len(parts) >= 3:
-    # Check distribution ID format
-    if (parts[0].startswith('e') and      # Distribution ID starts with E
-        len(parts[0]) == 14):             # Distribution ID is 14 chars
-      
-      # Check date format (YYYY-MM-DD-HH)
-      date_parts = parts[1].split('-')
-      if (len(date_parts) == 4 and        # Should have 4 parts
-          len(date_parts[0]) == 4 and     # Year should be 4 digits
-          date_parts[0].isdigit() and     # Year should be numeric
-          len(date_parts[1]) == 2 and     # Month should be 2 digits
-          date_parts[1].isdigit() and     # Month should be numeric
-          len(date_parts[2]) == 2 and     # Day should be 2 digits
-          date_parts[2].isdigit() and     # Day should be numeric
-          len(date_parts[3]) == 2 and     # Hour should be 2 digits
-          date_parts[3].isdigit()):       # Hour should be numeric
-        return "cloudfront"
+  # CloudFront logs can be detected by:
+  # 1. Path contains "cloudfront" (e.g., AWSLogs/.../CloudFront/...)
+  if 'cloudfront' in key_lower:
+    return "cloudfront"
   
   return "unknown"
 
