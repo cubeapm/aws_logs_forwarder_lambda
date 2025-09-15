@@ -80,7 +80,7 @@ def ship_logs(log_entries: List[str], file_path: str) -> bool:
     }
     extra_fields = os.environ.get('CUBE_EXTRA_FIELDS', '')
     if extra_fields:
-      headers['Cube-Extra-Fields'] = extra_fields  # key1:value1,key2:value2
+      headers['Cube-Extra-Fields'] = extra_fields  # key1=value1,key2=value2
 
     print(f"Shipping {len(log_entries)} log entries (compressed size: {len(gzipped_data)} bytes) from {file_path}")
     return post_with_retry(gzipped_data, headers, file_path)
