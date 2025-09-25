@@ -419,8 +419,10 @@ def process_cloudfront_logs(content: str, file_path: str) -> List[str]:
     print(f"Invalid CloudFront log - missing fields header: {file_path}")
     return log_entries
     
-  # Extract field names, removing '#Fields:' prefix and splitting on tabs
-  field_names = lines[1].replace('#Fields:', '').strip().split('\t')
+  # Extract field names, removing '#Fields:' prefix and splitting on tabs or spaces
+  fields_line = lines[1].replace('#Fields:', '').strip()
+  # Handle both tab and space separators - split on any whitespace
+  field_names = fields_line.split()
   
   print(f"Processing CloudFront file: {file_path}")
   
